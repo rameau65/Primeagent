@@ -76,6 +76,7 @@ import {
 	buildUnifiedSessionIndex,
 	computeRecursiveRollups,
 	createUnattachableChildOpenResult,
+	filterEmptyAgentsViewSessions,
 	filterUnifiedSessions,
 	formatHeartbeatBadge,
 	getAgentsViewSelectionKey,
@@ -109,8 +110,7 @@ const STATUS_MESSAGE_DURATION_MS = 4500;
 const SEARCH_PROMPT_PLACEHOLDER = "Search sessions";
 const REPLY_PROMPT_FALLBACK_PLACEHOLDER = "Write a reply to this agent";
 const RESUME_PROMPT_PLACEHOLDER = "Write a prompt to resume this session";
-const COMPLETED_ROW_ICON = "✓";
-const NEEDS_INPUT_ROW_ICON = "●";
+const STATUS_ROW_ICON = "•";
 const SELECTED_ROW_MARKER = "\0agents-view-selected-row\0";
 const CODE_ROW_MARKER = "\0agents-view-code-row\0";
 
@@ -666,7 +666,6 @@ export class AgentsViewMode implements Component, Focusable {
 	private workingIconFrame = 0;
 	private rows: AgentsViewRow[] = [];
 	private allRows: AgentsViewRow[] = [];
-	private showActions = false;
 	private lastListedSummaries: SessionSummary[] = [];
 	private lastVisibleSummaries: SessionSummary[] = [];
 	private savedSessions: AgentConnectionSavedSessionInfo[] = [];
@@ -849,12 +848,7 @@ export class AgentsViewMode implements Component, Focusable {
 			{
 				topPadding: true,
 				getExtraMetadata: () => {
-					const root = this.scopeRootSummary;
-					return [
-						{ label: "agents", value: this.getAgentCountsText() },
-						{ label: "scope", value: root ? getAgentsViewSessionTitle(root) : "global" },
-						{ label: "depth", value: String(getAgentsViewDepth(root)) },
-					];
+					return [{ label: "agents", value: this.getAgentCountsText() }];
 				},
 			},
 		);
@@ -922,12 +916,6 @@ export class AgentsViewMode implements Component, Focusable {
 
 	handleInput(data: string): void {
 		this.clearStickyStatusMessage();
-		if (this.showActions) {
-			this.showActions = false;
-			this.ui.requestRender();
-			if (this.keybindings.matches(data, "app.shortcuts") || this.keybindings.matches(data, "tui.select.cancel"))
-				return;
-		}
 		if (this.renameTarget) {
 			if (this.keybindings.matches(data, "tui.select.cancel")) {
 				this.exitRenameMode();
@@ -973,11 +961,6 @@ export class AgentsViewMode implements Component, Focusable {
 			return;
 		}
 		if (!this.replyTarget && this.editor.getText().length === 0) {
-			if (this.keybindings.matches(data, "app.shortcuts")) {
-				this.showActions = !this.showActions;
-				this.ui.requestRender();
-				return;
-			}
 			if (this.keybindings.matches(data, "app.agents.expand")) {
 				const row = this.rows[this.selectedIndex];
 				if (row && row.descendantCount > 0) this.toggleSubagentList(row);
@@ -1029,6 +1012,11 @@ export class AgentsViewMode implements Component, Focusable {
 		const noticeLines = this.renderStartupNotices(width);
 		if (noticeLines.length > 0) {
 			headerLines.push("", ...noticeLines);
+		}
+		const root = this.scopeRootSummary;
+		if (root) {
+			const scopeLabel = `${keyText("app.agents.back")} back · ${getAgentsViewSessionTitle(root)} › subagents`;
+			headerLines.push("", truncateToWidth(theme.fg("dim", scopeLabel), width));
 		}
 		headerLines.push("");
 
@@ -1306,7 +1294,13 @@ export class AgentsViewMode implements Component, Focusable {
 
 	private getFilteredRecords(): UnifiedSessionRecord[] {
 		const query = this.replyTarget || this.renameTarget ? (this.actionModeSearchQuery ?? "") : this.editor.getText();
-		return filterUnifiedSessions(this.scopedRecords, (text) => matchesSearchText(text, query));
+		const preservedSessionIds = new Set([
+			...(this.anchorSessionId ? [this.anchorSessionId] : []),
+			...(this.scopeKey ? [this.scopeKey.sessionId] : []),
+			...this.heartbeats.map((heartbeat) => heartbeat.job.sessionId),
+		]);
+		const records = filterEmptyAgentsViewSessions(this.scopedRecords, preservedSessionIds);
+		return query.trim() ? filterUnifiedSessions(records, (text) => matchesSearchText(text, query)) : records;
 	}
 
 	/** Rebuild rows from the last fetched summaries, keeping selection on the same row. */
@@ -2486,7 +2480,6 @@ export class AgentsViewMode implements Component, Focusable {
 
 	private renderSessionRows(width: number, maxRows: number): string[] {
 		if (maxRows <= 0) return [];
-		if (this.showActions) return this.renderActions(width).slice(0, maxRows);
 		const layout = buildCompactAgentsViewLayout(this.rows, width);
 		const displayItems: DisplayItem[] = [];
 		const counts = countRowsBySection(this.allRows.length > 0 ? this.allRows : this.rows);
@@ -2506,10 +2499,10 @@ export class AgentsViewMode implements Component, Focusable {
 			}
 		}
 		if (displayItems.length === 0) {
-			return [theme.fg("dim", "No sessions match your search.")];
+			return [theme.fg("dim", this.editor.getText().trim() ? "No sessions match your search." : "No sessions yet.")];
 		}
-		// Reserve the shared column header before calculating the selection viewport.
-		const headerRows = maxRows > 1 ? 1 : 0;
+		// Reserve the column header and its spacer, leaving at least one session row visible.
+		const headerRows = Math.min(2, maxRows - 1);
 		const visibleRows = maxRows - headerRows;
 		const selectedIdentity = this.rows[this.selectedIndex]?.identity;
 		const selectedDisplayIndex = displayItems.findIndex(
@@ -2534,13 +2527,14 @@ export class AgentsViewMode implements Component, Focusable {
 				);
 			}
 			if (item.type === "heading") {
-				return theme.bold(truncateToWidth(`${sectionTitle(item.section)} (${counts[item.section]})`, width));
+				return theme.fg("muted", truncateToWidth(`${sectionTitle(item.section)} (${counts[item.section]})`, width));
 			}
 			return this.renderRow(item.row, width, layout);
 		});
 		if (showLeadingEllipsis) lines.unshift(theme.fg("dim", "  ..."));
 		if (showTrailingEllipsis) lines.push(theme.fg("dim", "  ..."));
-		if (headerRows > 0) lines.unshift(theme.fg("muted", layout.legend));
+		if (headerRows > 1) lines.unshift("");
+		if (headerRows > 0) lines.unshift(theme.bold(layout.legend));
 		return lines;
 	}
 
@@ -2565,10 +2559,9 @@ export class AgentsViewMode implements Component, Focusable {
 			return markRow(formatTableCell(theme.fg("error", title), width));
 		}
 		const icon = this.formatRowIcon(row.section, this.getRowIcon(row.section));
-		const expand = row.descendantCount > 0 ? (this.expandedSubagentParents.has(row.identity) ? "▾" : "▸") : " ";
 		const badge = formatHeartbeatBadge(row.heartbeat);
 		const heartbeat = badge ? `${theme.fg((row.heartbeat?.activeCount ?? 0) > 0 ? "error" : "dim", badge)} ` : "";
-		const title = `${"  ".repeat(row.depth)}${icon}${expand} ${heartbeat}${styleRowTitle(row)}`;
+		const title = `${"  ".repeat(row.depth)}${icon} ${heartbeat}${styleRowTitle(row)}`;
 		const status =
 			row.summary.statusLabel !== undefined || row.summary.lastHeardFromAt !== undefined
 				? row.statusLabel
@@ -2579,31 +2572,8 @@ export class AgentsViewMode implements Component, Focusable {
 			formatTableCell(theme.fg("muted", formatSessionModel(row.summary)), layout.modelWidth),
 		];
 		if (layout.activityWidth > 0) cells.push(formatTableCell(theme.fg("dim", activity), layout.activityWidth));
-		cells.push(theme.fg("muted", details));
+		cells.push(theme.fg("dim", details));
 		return markRow(formatTableCell(cells.join("  "), width));
-	}
-
-	private renderActions(width: number): string[] {
-		const row = this.rows[this.selectedIndex];
-		const actions = [
-			`${keyText("tui.select.confirm")} open   ${keyText("app.agents.open")} open   ${keyText("app.agents.new")} new`,
-			`${keyText("app.agents.expand")} expand/collapse subagents   ${keyText("app.agents.program")} program`,
-			`${keyText("app.agents.reply")} reply/resume   ${keyText("app.agents.rename")} rename   ${keyText("app.agents.delete")} stop/delete`,
-			`${keyText("app.shortcuts")} close actions`,
-		];
-		if (row) {
-			const model = row.summary.model;
-			const usage = row.summary.usage;
-			actions.push(
-				"",
-				row.title,
-				`Model: ${model ? `${model.provider}/${model.id}` : "unknown"}${row.summary.thinkingLevel ? ` · ${row.summary.thinkingLevel}` : ""}`,
-				`Directory: ${row.summary.cwd}`,
-				`Tokens: ${usage?.inputTokens ?? 0} in · ${usage?.outputTokens ?? 0} out`,
-				`Cost: $${(usage?.cost ?? 0).toFixed(2)} session · $${row.recursiveCost.toFixed(2)} including subagents`,
-			);
-		}
-		return actions.flatMap((line) => wrapTextWithAnsi(theme.fg("muted", line), width));
 	}
 
 	// Spawn-code rows are read-only context. They render deemphasized — muted
@@ -2692,7 +2662,7 @@ export class AgentsViewMode implements Component, Focusable {
 		if (this.replyTarget) {
 			return truncateToWidth(theme.fg("muted", this.renderReplyComposerHints()), width);
 		}
-		const hints = `${keyText("tui.select.up")}/${keyText("tui.select.down")} navigate   ${keyText("tui.select.confirm")} open   ${keyText("app.agents.new")} new   ${keyText("app.shortcuts")} actions`;
+		const hints = `${keyText("tui.select.up")}/${keyText("tui.select.down")} navigate   ${keyText("tui.select.confirm")} open   ${keyText("app.agents.new")} new`;
 		return truncateToWidth(theme.fg("muted", hints), width);
 	}
 
@@ -2735,9 +2705,8 @@ export class AgentsViewMode implements Component, Focusable {
 			case "running":
 				return workingIconFrame(this.workingIconFrame);
 			case "idle":
-				return NEEDS_INPUT_ROW_ICON;
 			case "inactive":
-				return COMPLETED_ROW_ICON;
+				return STATUS_ROW_ICON;
 			default: {
 				const _exhaustive: never = section;
 				return _exhaustive;
@@ -2750,9 +2719,9 @@ export class AgentsViewMode implements Component, Focusable {
 			case "running":
 				return theme.bold(icon);
 			case "idle":
-				return theme.fg("warning", icon);
+				return theme.bold(theme.fg("warning", icon));
 			case "inactive":
-				return theme.fg("dim", icon);
+				return theme.bold(theme.fg("dim", icon));
 			default: {
 				const _exhaustive: never = section;
 				return _exhaustive;
@@ -2872,7 +2841,8 @@ function formatTableCell(value: string, width: number): string {
 }
 
 function formatSessionModel(summary: SessionSummary): string {
-	return summary.model?.id ?? "-";
+	const id = summary.model?.id;
+	return id ? id.replace(/^[^/]+\//, "") || id : "-";
 }
 
 function formatSessionDuration(summary: SessionSummary): string {
