@@ -410,6 +410,15 @@ describe("agent trace upload", () => {
 		sessionManager.appendMessage(createAssistantMessage("hi"));
 		await advanceTimersUntil(() => calls.length === 1);
 		expect(calls[0].url).toBe("https://api.example.test/api/v1/agent-traces/sessions/listener-session");
+		// The request starts before the upload cursor and completion log are written.
+		const sessionFile = sessionManager.getSessionFile() as string;
+		await advanceTimersUntil(() => {
+			const logPath = getAgentTracesLogPath();
+			return (
+				existsSync(logPath) &&
+				readFileSync(logPath, "utf8").includes(`uploaded session uploaded-session (123 bytes) [${sessionFile}]`)
+			);
+		});
 	});
 
 	it("coalesces new content that persists during an in-flight upload into one follow-up upload", async () => {
