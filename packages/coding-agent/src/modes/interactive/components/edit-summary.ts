@@ -82,8 +82,8 @@ export function mergeTurnFileChanges(
 
 /** Dim gutter that anchors every per-file change summary line. */
 const FILE_CHANGE_SUMMARY_PREFIX = "    ╰─ ";
-/** Indent that aligns diff rows with the summary line's text column. */
-export const FILE_CHANGE_DIFF_INDENT = " ".repeat(visibleWidth(FILE_CHANGE_SUMMARY_PREFIX));
+/** Standard content inset for full-width diff rows. */
+export const FILE_CHANGE_DIFF_INDENT = " ";
 
 function formatChangeCounts(change: Pick<FileChangeSummary, "added" | "removed">): string {
 	return `${theme.fg("toolDiffAdded", `+${change.added}`)} ${theme.fg("toolDiffRemoved", `-${change.removed}`)}`;
@@ -108,14 +108,11 @@ export function formatFileChangeSummaryLine(
 	width: number,
 ): string {
 	const prefix = theme.fg("dim", FILE_CHANGE_SUMMARY_PREFIX);
-	const hint =
-		diffsExpanded === undefined
-			? ""
-			: `${theme.fg("dim", " · ")}${expandCollapseHint("app.edits.expand", diffsExpanded)}`;
-	// Size the path against the wider hint variant ("to collapse") so toggling
-	// ctrl+j never re-truncates it — the summary line is a stable anchor.
-	const widestHint =
-		diffsExpanded === undefined ? "" : `${theme.fg("dim", " · ")}${expandCollapseHint("app.edits.expand", true)}`;
+	const detailHint = diffsExpanded === undefined ? "" : expandCollapseHint("app.tools.expand", diffsExpanded);
+	const hint = detailHint ? `${theme.fg("dim", " · ")}${detailHint}` : "";
+	// Keep the summary path stable across conversation detail modes.
+	const expandedHint = diffsExpanded === undefined ? "" : expandCollapseHint("app.tools.expand", true);
+	const widestHint = expandedHint ? `${theme.fg("dim", " · ")}${expandedHint}` : "";
 	const counts = `${theme.fg("dim", " ")}${formatChangeCounts(change)}`;
 	const suffix = `${counts}${hint}`;
 	const safeWidth = Math.max(1, width);

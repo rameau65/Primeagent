@@ -23,6 +23,7 @@ describe("InteractiveMode startup hints", () => {
 	function createMode(messageCount = 0, returnToAgentsView = false, getEditorText = () => "") {
 		const mode = {
 			options: { returnToAgentsView },
+			ui: { hasOverlay: () => false },
 			editor: { getText: getEditorText },
 			connectionState: {
 				model: { name: "test-model", reasoning: true },
@@ -261,6 +262,34 @@ describe("InteractiveMode startup hints", () => {
 		const label = Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode);
 
 		expect(stripAnsi(label)).toBe("test-model • high");
+	});
+
+	it("keeps remapped conversation detail shortcuts out of the footer while typing", () => {
+		setKeybindings(new KeybindingsManager({ "app.tools.expand": ["ctrl+e", "ctrl+g"] }));
+		const mode = createMode(2, false, () => "draft prompt");
+		const label = stripAnsi(Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode));
+
+		expect(label).toBe("test-model • high");
+		expect(label).not.toContain("detail");
+		expect(label).not.toContain("Ctrl+E");
+		expect(label).not.toContain("Ctrl+O");
+		expect(label).not.toContain("Ctrl+G");
+	});
+
+	it("omits the detail hint when the binding is disabled", () => {
+		setKeybindings(new KeybindingsManager({ "app.tools.expand": [] }));
+		const label = stripAnsi(Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(createMode(1)));
+
+		expect(label).toBe("test-model • high");
+		expect(label).not.toContain("detail");
+	});
+
+	it("keeps the footer free of detail shortcuts while an overlay owns the input", () => {
+		const mode = createMode(1);
+		mode.ui.hasOverlay = () => true;
+		const label = stripAnsi(Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode));
+
+		expect(label).toBe("test-model • high");
 	});
 
 	it("keeps the question-mark shortcut guide compact", () => {

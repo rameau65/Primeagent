@@ -2,7 +2,9 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Component, MarkdownTheme, TUI } from "@earendil-works/pi-tui";
 import { isAgentSessionMessage } from "../../../core/agent-messages.js";
 import {
+	ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
 	COMPACTION_OUTCOME_CUSTOM_TYPE,
+	type CustomMessage,
 	isCompactionOutcomeMessage,
 	isRefinementOutcomeMessage,
 	isSessionSlashCommandMessage,
@@ -24,6 +26,7 @@ import {
 	MalformedRefinementOutcomeMessageComponent,
 	RefinementOutcomeMessageComponent,
 } from "./refinement-outcome-message.js";
+import { readShellCompletion, ShellCompletionComponent } from "./shell-completion.js";
 import { SlashCommandMessageComponent } from "./slash-command-message.js";
 import { SlashCommandResultMessageComponent } from "./slash-command-result-message.js";
 import {
@@ -43,7 +46,6 @@ export interface ConversationComponentsOptions {
 	hideThinkingBlock?: boolean;
 	hiddenThinkingLabel?: string;
 	toolsExpanded?: boolean;
-	agentMessagesExpanded?: boolean;
 	editDiffsExpanded?: boolean;
 	isRecognizedSlashCommand?: (name: string) => boolean;
 }
@@ -53,7 +55,8 @@ export function isCompactAgentMessageNeighbor(component: Component | undefined):
 		component instanceof AgentMessageComponent ||
 		component instanceof ToolExecutionComponent ||
 		component instanceof IPythonCellComponent ||
-		component instanceof BashExecutionComponent
+		component instanceof BashExecutionComponent ||
+		component instanceof ShellCompletionComponent
 	);
 }
 
@@ -69,6 +72,39 @@ function readUserText(content: string | Array<{ type: string; text?: string }>):
 		.join("");
 }
 
+export function createShellCompletionComponent(
+	message: CustomMessage,
+	previous: readonly Component[],
+): ShellCompletionComponent | undefined {
+	if (message.customType !== ASYNC_BASH_COMPLETION_CUSTOM_TYPE) return undefined;
+	const component = new ShellCompletionComponent(message);
+	const completion = readShellCompletion(message);
+	if (!completion) return component;
+	const tools = previous.filter((entry): entry is ToolExecutionComponent => entry instanceof ToolExecutionComponent);
+	const cleanups: (() => void)[] = [];
+	const attach = () => {
+		// A completion can arrive before its creating cell's final tool result.
+		if (tools.some((tool) => tool.isResultPending())) return;
+		for (const cleanup of cleanups) cleanup();
+		const commandMatches = tools.filter(
+			(tool) =>
+				(tool.getBackgroundShellHandle()?.command ?? tool.getAssignedShellCommand()) === completion.details.command,
+		);
+		const pidMatches = commandMatches.filter(
+			(tool) => tool.getBackgroundShellHandle()?.pid === completion.details.pid,
+		);
+		const matches = pidMatches.length > 0 ? pidMatches : commandMatches;
+		if (matches.length !== 1) return;
+		const match = matches[0]!;
+		const handle = match.getBackgroundShellHandle();
+		if (handle && handle.pid !== completion.details.pid) return;
+		if (match.attachShellCompletion(completion)) component.setAttached();
+	};
+	for (const tool of tools) if (tool.isResultPending()) cleanups.push(tool.onResultUpdate(attach));
+	attach();
+	return component;
+}
+
 /** Build conversation components from a message list, matching tool results to their calls. */
 export function buildConversationComponents(
 	messages: readonly AgentMessage[],
@@ -77,7 +113,6 @@ export function buildConversationComponents(
 	const components: Component[] = [];
 	const pendingTools = new Map<string, ToolExecutionComponent>();
 	const expanded = options.toolsExpanded ?? false;
-	const agentMessagesExpanded = options.agentMessagesExpanded ?? false;
 	const editDiffsExpanded = options.editDiffsExpanded ?? false;
 
 	for (const message of messages) {
@@ -87,13 +122,11 @@ export function buildConversationComponents(
 					message,
 					options.hideThinkingBlock ?? false,
 					options.markdownTheme,
-					options.hiddenThinkingLabel ?? "Thinking...",
+					options.hiddenThinkingLabel ?? "Thinking:",
 					{
 						cwd: options.cwd,
 						expanded,
-						precededByToolActivity:
-							components.at(-1) instanceof ToolExecutionComponent ||
-							components.at(-1) instanceof AgentMessageComponent,
+						precededByToolActivity: isCompactAgentMessageNeighbor(components.at(-1)),
 					},
 				),
 			);
@@ -111,7 +144,6 @@ export function buildConversationComponents(
 					options.cwd,
 				);
 				tool.setExpanded(expanded);
-				tool.setAgentMessagesExpanded(agentMessagesExpanded);
 				tool.setEditDiffsExpanded(editDiffsExpanded);
 				tool.markExecutionStarted();
 				tool.setArgsComplete();
@@ -160,10 +192,12 @@ export function buildConversationComponents(
 			const component = new AgentMessageComponent(message, options.markdownTheme, {
 				suppressLeadingSpace: isCompactAgentMessageNeighbor(components.at(-1)),
 			});
-			component.setExpanded(agentMessagesExpanded);
+			component.setExpanded(expanded);
 			components.push(component);
 		} else if (isInjectedPromptMessage(message) && message.display) {
-			const component = new InjectedPromptMessageComponent(message, options.markdownTheme);
+			const component =
+				createShellCompletionComponent(message, components) ??
+				new InjectedPromptMessageComponent(message, options.markdownTheme);
 			component.setExpanded(expanded);
 			components.push(component);
 		} else if (message.role === "user") {

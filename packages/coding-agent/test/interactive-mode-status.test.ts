@@ -4253,6 +4253,7 @@ describe("InteractiveMode goal status announcements", () => {
 });
 
 describe("InteractiveMode tray goal label", () => {
+	beforeAll(() => setKeybindings(new KeybindingsManager()));
 	type TrayUsage = { contextWindow: number; tokens: number | null; percent: number | null };
 	type TrayLabelHarness = {
 		heartbeatCatalog: AgentConnectionHeartbeat[];
@@ -4306,7 +4307,7 @@ describe("InteractiveMode tray goal label", () => {
 		};
 		fakeThis.uiServices = { getContextUsage: () => undefined };
 
-		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s)");
+		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s) · Showing overview (Ctrl+O to expand)");
 	});
 
 	test("combines active goals with token/context usage in one lower-tray label", () => {
@@ -4328,7 +4329,9 @@ describe("InteractiveMode tray goal label", () => {
 		};
 		fakeThis.uiServices = { getContextUsage: () => undefined };
 
-		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s) · 75k (75%)");
+		expect(getTrayContextLabel.call(fakeThis)).toBe(
+			"Pursuing goal (1m 05s) · 75k (75%) · Showing overview (Ctrl+O to expand)",
+		);
 	});
 
 	test("combines active goals, active heartbeats, and context usage in one lower-tray label", () => {
@@ -4351,7 +4354,9 @@ describe("InteractiveMode tray goal label", () => {
 		};
 		fakeThis.uiServices = { getContextUsage: () => undefined };
 
-		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s) · 1 heartbeat · 75k (75%)");
+		expect(getTrayContextLabel.call(fakeThis)).toBe(
+			"Pursuing goal (1m 05s) · 1 heartbeat (Ctrl+R) · 75k (75%) · Showing overview (Ctrl+O to expand)",
+		);
 	});
 
 	test("omits the usage segment when token count is unknown", () => {
@@ -4373,7 +4378,7 @@ describe("InteractiveMode tray goal label", () => {
 		};
 		fakeThis.uiServices = { getContextUsage: () => undefined };
 
-		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s)");
+		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s) · Showing overview (Ctrl+O to expand)");
 	});
 });
 
@@ -4540,8 +4545,9 @@ describe("InteractiveMode.setToolsExpanded", () => {
 	function createExpansionFakeThis(chatChildren: unknown[]): any {
 		const fakeThis: any = {
 			toolOutputExpanded: false,
-			agentMessagesExpanded: false,
 			editDiffsExpanded: false,
+			hideThinkingBlock: true,
+			pendingBashComponents: [],
 			customHeader: undefined,
 			builtInHeader: { setExpanded: vi.fn() },
 			chatContainer: { children: chatChildren },
@@ -4568,56 +4574,66 @@ describe("InteractiveMode.setToolsExpanded", () => {
 		expect(fakeThis.ui.requestRenderPreservingViewport).toHaveBeenCalledTimes(1);
 	});
 
-	test("toggles agent messages separately from tools", () => {
+	test("keeps agent message notices visible and reveals bodies only with all output", () => {
 		const toolChild = { setExpanded: vi.fn() };
-		const ipythonChild = { setExpanded: vi.fn(), setAgentMessagesExpanded: vi.fn(), setEditDiffsExpanded: vi.fn() };
+		const ipythonChild = { setExpanded: vi.fn(), setEditDiffsExpanded: vi.fn() };
 		const messageChild = new AgentMessageComponent({
 			role: "custom",
 			customType: "agent_message",
 			content: "Ping.",
 			display: true,
-			details: { id: "agentmsg_split", message: "Ping.", from: null },
+			details: { id: "agentmsg_split", message: "Ping." },
 			timestamp: 123,
-		} as any);
-		const messageSetExpanded = vi.spyOn(messageChild, "setExpanded");
+		});
 		const fakeThis = createExpansionFakeThis([toolChild, ipythonChild, messageChild]);
 
-		fakeThis.toggleAgentMessageExpansion();
+		expect(messageChild.render(80).join("\n")).toContain("Agent message received");
+		expect(messageChild.render(80).join("\n")).not.toContain("Ping.");
+		fakeThis.toggleToolOutputExpansion();
+		expect(messageChild.render(80).join("\n")).toContain("Agent message received");
+		expect(messageChild.render(80).join("\n")).not.toContain("Ping.");
+		expect(toolChild.setExpanded).toHaveBeenLastCalledWith(false);
+		expect(ipythonChild.setExpanded).toHaveBeenLastCalledWith(false);
 
-		expect(fakeThis.agentMessagesExpanded).toBe(true);
-		expect(fakeThis.toolOutputExpanded).toBe(false);
-		expect(messageSetExpanded).toHaveBeenCalledWith(true);
-		expect(toolChild.setExpanded).toHaveBeenCalledWith(false);
-		expect(ipythonChild.setExpanded).toHaveBeenCalledWith(false);
-		expect(ipythonChild.setAgentMessagesExpanded).toHaveBeenCalledWith(true);
+		fakeThis.toggleToolOutputExpansion();
+		expect(messageChild.render(80).join("\n")).toContain("Ping.");
+		expect(toolChild.setExpanded).toHaveBeenLastCalledWith(true);
+		expect(ipythonChild.setExpanded).toHaveBeenLastCalledWith(true);
 
-		fakeThis.setToolsExpanded(true);
-
-		expect(toolChild.setExpanded).toHaveBeenCalledWith(true);
-		expect(messageSetExpanded).toHaveBeenLastCalledWith(true);
-		expect(ipythonChild.setExpanded).toHaveBeenCalledWith(true);
-		expect(ipythonChild.setAgentMessagesExpanded).toHaveBeenLastCalledWith(true);
-		expect(fakeThis.agentMessagesExpanded).toBe(true);
+		fakeThis.toggleToolOutputExpansion();
+		expect(messageChild.render(80).join("\n")).toContain("Agent message received");
+		expect(messageChild.render(80).join("\n")).not.toContain("Ping.");
+		expect(toolChild.setExpanded).toHaveBeenLastCalledWith(false);
+		expect(ipythonChild.setExpanded).toHaveBeenLastCalledWith(false);
 	});
 
-	test("toggles edit diffs separately from tools and agent messages", () => {
-		const child = { setExpanded: vi.fn(), setAgentMessagesExpanded: vi.fn(), setEditDiffsExpanded: vi.fn() };
+	test("cycles from overview through details and all back to overview", () => {
+		const child = { setExpanded: vi.fn(), setEditDiffsExpanded: vi.fn() };
 		const fakeThis = createExpansionFakeThis([child]);
 
-		fakeThis.toggleEditDiffExpansion();
+		fakeThis.toggleToolOutputExpansion();
 
 		expect(fakeThis.editDiffsExpanded).toBe(true);
+		expect(fakeThis.hideThinkingBlock).toBe(false);
 		expect(fakeThis.toolOutputExpanded).toBe(false);
-		expect(fakeThis.agentMessagesExpanded).toBe(false);
 		expect(child.setEditDiffsExpanded).toHaveBeenCalledWith(true);
 		expect(child.setExpanded).toHaveBeenCalledWith(false);
-		expect(child.setAgentMessagesExpanded).toHaveBeenCalledWith(false);
 
-		fakeThis.setToolsExpanded(true);
+		fakeThis.toggleToolOutputExpansion();
 
 		expect(fakeThis.editDiffsExpanded).toBe(true);
+		expect(fakeThis.hideThinkingBlock).toBe(false);
+		expect(fakeThis.toolOutputExpanded).toBe(true);
 		expect(child.setEditDiffsExpanded).toHaveBeenLastCalledWith(true);
 		expect(child.setExpanded).toHaveBeenLastCalledWith(true);
+
+		fakeThis.toggleToolOutputExpansion();
+
+		expect(fakeThis.editDiffsExpanded).toBe(false);
+		expect(fakeThis.hideThinkingBlock).toBe(true);
+		expect(fakeThis.toolOutputExpanded).toBe(false);
+		expect(child.setEditDiffsExpanded).toHaveBeenLastCalledWith(false);
+		expect(child.setExpanded).toHaveBeenLastCalledWith(false);
 	});
 });
 

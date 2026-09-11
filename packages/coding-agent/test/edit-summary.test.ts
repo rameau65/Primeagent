@@ -141,7 +141,7 @@ describe("edit summaries", () => {
 describe("formatFileChangeSummaryLine", () => {
 	beforeAll(() => initTheme("dark"));
 
-	test("keeps the truncated path stable when the ctrl+j hint flips", () => {
+	test("keeps the truncated path stable across detail expansion states", () => {
 		const change = { added: 3, removed: 1 };
 		const path = "src/some/deeply/nested/directory/with-a-long-file-name.ts";
 		const width = 44;
@@ -150,5 +150,8 @@ describe("formatFileChangeSummaryLine", () => {
 		const collapsed = formatFileChangeSummaryLine(path, undefined, change, false, width);
 		expect(stripAnsi(expanded)).toContain("…");
 		expect(pathPart(expanded)).toBe(pathPart(collapsed));
+		expect(stripAnsi(expanded)).toMatch(/\+3 -1$/);
+		expect(stripAnsi(collapsed)).toMatch(/\+3 -1$/);
+		expect(stripAnsi(expanded)).not.toContain("Ctrl+O");
 	});
 });
