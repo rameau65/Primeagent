@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { accessSync, constants } from "node:fs";
 import { join, relative } from "node:path";
 import { APP_NAME, type SelfUpdateCommand } from "../config.js";
@@ -29,6 +30,22 @@ export async function getNativeUpdatePlan(options: {
 		const previous = readNativeInstallation(installation.root, "previous");
 		if (!previous || previous.executable === installation.executable)
 			throw new Error("No valid previous compiled release is available.");
+		let reportedVersion: string;
+		try {
+			reportedVersion = execFileSync(previous.executable, ["--version"], {
+				encoding: "utf8",
+				timeout: 10000,
+			});
+		} catch {
+			throw new Error("The previous compiled release executable could not be validated.");
+		}
+		if (reportedVersion !== previous.version && reportedVersion !== `${previous.version}\n`)
+			throw new Error("The previous compiled release executable reports a different version.");
+		try {
+			execFileSync(previous.executable, ["--help"], { stdio: "ignore", timeout: 10000 });
+		} catch {
+			throw new Error("The previous compiled release executable failed its help probe.");
+		}
 		version = previous.version;
 		previousTarget = relative(join(installation.root, "bin"), previous.executable);
 	} else {

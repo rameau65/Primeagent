@@ -1,8 +1,9 @@
 import { mkdirSync, mkdtempSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getNativeUpdatePlan } from "../src/cli/native-update.js";
+import { NATIVE_RELEASE_ASSETS } from "../src/utils/native-installation.js";
 import { getLatestPiRelease } from "../src/utils/version-check.js";
 
 const artifact = {
@@ -35,6 +36,10 @@ describe("native release metadata isolation", () => {
 		mkdirSync(releaseDir, { recursive: true });
 		mkdirSync(join(root, "bin"));
 		writeFileSync(join(root, ".managed"), "prime-agent-native-v1\n");
+		for (const asset of NATIVE_RELEASE_ASSETS) {
+			mkdirSync(dirname(join(releaseDir, asset)), { recursive: true });
+			writeFileSync(join(releaseDir, asset), "fixture\n");
+		}
 		writeFileSync(join(releaseDir, ".archive-sha256"), checksum);
 		writeFileSync(join(releaseDir, ".install-source"), baseUrl);
 		writeFileSync(join(releaseDir, "package.json"), JSON.stringify({ version: "1.2.3" }));

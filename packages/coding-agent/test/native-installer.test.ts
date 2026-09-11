@@ -5,6 +5,7 @@ import {
 	lstatSync,
 	mkdirSync,
 	mkdtempSync,
+	readdirSync,
 	readFileSync,
 	readlinkSync,
 	realpathSync,
@@ -116,6 +117,26 @@ async function run(executable: string, args: string[], extra: NodeJS.ProcessEnv 
 
 function command() {
 	return join(home, "data/prime-agent/bin/prime-agent");
+}
+
+function installationRoot() {
+	return join(home, "data/prime-agent");
+}
+
+function releaseDirectories() {
+	return readdirSync(join(installationRoot(), "releases"), { withFileTypes: true })
+		.filter((entry) => entry.isDirectory())
+		.map((entry) => join(installationRoot(), "releases", entry.name));
+}
+
+function createLsofShim() {
+	const shim = mkdtempSync(join(root, "lsof-"));
+	writeFileSync(
+		join(shim, "lsof"),
+		'#!/bin/sh\nfor candidate in "$@"; do executable="$candidate"; done\nif [ -n "$LIVE_EXECUTABLE" ] && [ "$executable" = "$LIVE_EXECUTABLE" ]; then printf "p123\\n"; exit 0; fi\nif [ -n "$UNCERTAIN_EXECUTABLE" ] && [ "$executable" = "$UNCERTAIN_EXECUTABLE" ]; then printf "cannot inspect\\n" >&2; exit 2; fi\nexit 1\n',
+		{ mode: 0o755 },
+	);
+	return shim;
 }
 
 function daemonSocket() {
@@ -275,8 +296,6 @@ describe.skipIf(process.platform === "win32")("managed compiled installer", () =
 			expect(existsSync(resolve(dirname(command()), replaced))).toBe(true);
 			expect((await install("--rollback")).code).not.toBe(0);
 			rmSync(join(home, "data/prime-agent/.install-lock"), { recursive: true });
-			rmSync(previous);
-			symlinkSync(replaced, previous);
 		} else {
 			expect(readlinkSync(previous)).toBe(replaced);
 			expect(existsSync(join(home, "data/prime-agent/.install-lock"))).toBe(false);
@@ -344,28 +363,54 @@ describe.skipIf(process.platform === "win32")("managed compiled installer", () =
 		);
 	});
 
-	it.each(["changed previous", "missing asset", "broken executable"])(
-		"preserves the active release when rollback finds a %s",
-		async (failure) => {
-			publish("1.0.0");
-			expect((await install("1.0.0")).code).toBe(0);
-			const previousDir = dirname(realpathSync(command()));
-			publish("1.0.1");
-			expect((await install("1.0.1")).code).toBe(0);
-			const current = readlinkSync(command());
-			const previous = readlinkSync(join(dirname(command()), "previous"));
-			if (failure === "missing asset") rmSync(join(previousDir, "theme/prime.json"));
-			if (failure === "broken executable") writeFileSync(join(previousDir, "prime-agent"), "#!/bin/sh\nexit 1\n");
-			const result = await install(
-				"--rollback",
-				failure === "changed previous" ? { PRIME_AGENT_EXPECTED_PREVIOUS: "an older release" } : {},
-			);
-			expect(result.code, result.output).not.toBe(0);
-			expect(readlinkSync(command())).toBe(current);
-			expect(readlinkSync(join(dirname(command()), "previous"))).toBe(previous);
-			expect(execFileSync(command(), ["--version"], { encoding: "utf8" })).toBe("1.0.1\n");
-		},
-	);
+	it.each([
+		"changed previous",
+		"missing asset",
+		"checksum marker",
+		"package version",
+		"executable version",
+		"source symlink",
+		"asset parent symlink",
+	])("preserves the active release when rollback finds a %s", async (failure) => {
+		publish("1.0.0");
+		expect((await install("1.0.0")).code).toBe(0);
+		const previousDir = dirname(realpathSync(command()));
+		publish("1.0.1");
+		expect((await install("1.0.1")).code).toBe(0);
+		const current = readlinkSync(command());
+		const previous = readlinkSync(join(dirname(command()), "previous"));
+		if (failure === "missing asset") rmSync(join(previousDir, "theme/prime.json"));
+		if (failure === "checksum marker") writeFileSync(join(previousDir, ".archive-sha256"), `${"b".repeat(64)}\n`);
+		if (failure === "package version") writeFileSync(join(previousDir, "package.json"), '{"version":"9.9.9"}\n');
+		if (failure === "executable version")
+			writeFileSync(join(previousDir, "prime-agent"), "#!/bin/sh\nprintf '9.9.9\\n'\n", { mode: 0o755 });
+		if (failure === "source symlink") {
+			const source = join(root, "outside-install-source");
+			writeFileSync(source, "https://example.com\n");
+			rmSync(join(previousDir, ".install-source"));
+			symlinkSync(source, join(previousDir, ".install-source"));
+		}
+		if (failure === "asset parent symlink") {
+			const theme = join(root, "outside-theme");
+			mkdirSync(theme);
+			writeFileSync(join(theme, "prime.json"), "fixture\n");
+			rmSync(join(previousDir, "theme"), { recursive: true });
+			symlinkSync(theme, join(previousDir, "theme"), "dir");
+		}
+		if (failure !== "changed previous") {
+			await expect(
+				getNativeUpdatePlan({ force: false, rollback: true, executable: realpathSync(command()) }),
+			).rejects.toThrow();
+		}
+		const result = await install(
+			"--rollback",
+			failure === "changed previous" ? { PRIME_AGENT_EXPECTED_PREVIOUS: "an older release" } : {},
+		);
+		expect(result.code, result.output).not.toBe(0);
+		expect(readlinkSync(command())).toBe(current);
+		expect(readlinkSync(join(dirname(command()), "previous"))).toBe(previous);
+		expect(execFileSync(command(), ["--version"], { encoding: "utf8" })).toBe("1.0.1\n");
+	});
 
 	it.each(["1.0.0", "1.0.1"])("retries the Node fallback when reinstalling or upgrading to %s", async (version) => {
 		publish("1.0.0", { broken: true });
@@ -552,7 +597,7 @@ if [ "$destination" = "$INTERRUPT_COMMAND" ] && [ "$INTERRUPT_POINT" = after ]; 
 		expect(readlinkSync(join(dirname(command()), "previous"))).toBe(previous);
 	});
 
-	it.each(["HUP", "TERM", "KILL"])("retains a rollback target after %s interrupts activation", async (signal) => {
+	it.each(["HUP", "TERM"])("retains a rollback target after %s interrupts activation", async (signal) => {
 		for (const version of ["1.0.0", "1.0.1", "1.0.2"]) publish(version);
 		expect((await install("1.0.0")).code).toBe(0);
 		const retained = readlinkSync(command());
@@ -570,10 +615,132 @@ if [ "$destination" = "$INTERRUPT_COMMAND" ] && [ "$INTERRUPT_POINT" = after ]; 
 			INTERRUPT_SIGNAL: signal,
 		});
 		expect(result.code, result.output).not.toBe(0);
-		expect(readlinkSync(join(dirname(command()), "previous"))).toBe(signal === "KILL" ? retained : replaced);
+		expect(readlinkSync(join(dirname(command()), "previous"))).toBe(replaced);
 		expect(readlinkSync(command())).not.toBe(retained);
 		expect(execFileSync(command(), ["--version"], { encoding: "utf8" })).toBe("1.0.2\n");
-		expect(existsSync(join(home, "data/prime-agent/.install-lock"))).toBe(signal === "KILL");
+		expect(existsSync(join(home, "data/prime-agent/.install-lock"))).toBe(false);
+		expect(existsSync(join(installationRoot(), ".activation-state"))).toBe(false);
+	});
+
+	it.each([
+		["first update", ["1.0.0"], "1.0.0"],
+		["subsequent update", ["1.0.0", "1.0.1"], "1.0.1"],
+	] as const)(
+		"recovers the exact replaced release after SIGKILL during a %s",
+		async (_label, installed, replacedVersion) => {
+			for (const version of ["1.0.0", "1.0.1", "1.0.2"]) publish(version);
+			for (const version of installed) expect((await install(version)).code).toBe(0);
+			const shim = mkdtempSync(join(root, "kill-activation-"));
+			writeFileSync(
+				join(shim, "mv"),
+				'#!/bin/sh\n/bin/mv "$@" || exit $?\nfor destination in "$@"; do :; done\nif [ "$destination" = "$INTERRUPT_BIN/prime-agent" ]; then kill -KILL "$PPID"; fi\n',
+				{ mode: 0o755 },
+			);
+			const killed = await install("1.0.2", {
+				PATH: `${shim}:/usr/bin:/bin`,
+				INTERRUPT_BIN: realpathSync(dirname(command())),
+			});
+			expect(killed.code, killed.output).not.toBe(0);
+			expect(execFileSync(command(), ["--version"], { encoding: "utf8" })).toBe("1.0.2\n");
+			expect(existsSync(join(installationRoot(), ".activation-state"))).toBe(true);
+			expect(readdirSync(installationRoot()).some((entry) => entry.startsWith(".install."))).toBe(true);
+			rmSync(join(installationRoot(), ".install-lock"), { recursive: true });
+			const rollback = await install("--rollback");
+			expect(rollback.code, rollback.output).toBe(0);
+			expect(execFileSync(command(), ["--version"], { encoding: "utf8" })).toBe(`${replacedVersion}\n`);
+			expect(existsSync(join(installationRoot(), ".activation-state"))).toBe(false);
+			expect(readdirSync(installationRoot()).some((entry) => entry.startsWith(".install."))).toBe(false);
+		},
+	);
+
+	it("recovers a completed previous-link rename after SIGKILL", async () => {
+		for (const version of ["1.0.0", "1.0.1", "1.0.2"]) publish(version);
+		expect((await install("1.0.0")).code).toBe(0);
+		expect((await install("1.0.1")).code).toBe(0);
+		const shim = mkdtempSync(join(root, "kill-after-previous-"));
+		writeFileSync(
+			join(shim, "mv"),
+			'#!/bin/sh\n/bin/mv "$@" || exit $?\nfor destination in "$@"; do :; done\nif [ "$destination" = "$INTERRUPT_BIN/previous" ]; then kill -KILL "$PPID"; fi\n',
+			{ mode: 0o755 },
+		);
+		const killed = await install("1.0.2", {
+			PATH: `${shim}:/usr/bin:/bin`,
+			INTERRUPT_BIN: realpathSync(dirname(command())),
+		});
+		expect(killed.code, killed.output).not.toBe(0);
+		expect(existsSync(join(installationRoot(), ".activation-state"))).toBe(true);
+		rmSync(join(installationRoot(), ".install-lock"), { recursive: true });
+		const rollback = await install("--rollback");
+		expect(rollback.code, rollback.output).toBe(0);
+		expect(execFileSync(command(), ["--version"], { encoding: "utf8" })).toBe("1.0.1\n");
+	});
+
+	it("refuses ambiguous activation recovery without changing either launcher", async () => {
+		for (const version of ["1.0.0", "1.0.1", "1.0.2"]) publish(version);
+		const lsof = createLsofShim();
+		const environment = { PATH: `${lsof}:/usr/bin:/bin` };
+		expect((await install("1.0.0", environment)).code).toBe(0);
+		const oldest = readlinkSync(command());
+		expect((await install("1.0.1", { ...environment, LIVE_EXECUTABLE: realpathSync(command()) })).code).toBe(0);
+		const middle = readlinkSync(command());
+		expect(
+			(await install("1.0.2", { ...environment, LIVE_EXECUTABLE: resolve(dirname(command()), oldest) })).code,
+		).toBe(0);
+		const current = readlinkSync(command());
+		const previous = readlinkSync(join(dirname(command()), "previous"));
+		writeFileSync(join(installationRoot(), ".activation-state"), `${middle}\n${oldest}\n`);
+		const result = await install("--rollback", environment);
+		expect(result.code, result.output).not.toBe(0);
+		expect(result.output).toContain("activation recovery is ambiguous");
+		expect(readlinkSync(command())).toBe(current);
+		expect(readlinkSync(join(dirname(command()), "previous"))).toBe(previous);
+		expect(readFileSync(join(installationRoot(), ".activation-state"), "utf8")).toBe(`${middle}\n${oldest}\n`);
+	});
+
+	it("prunes only inactive managed releases and safe orphan staging directories", async () => {
+		for (const version of ["1.0.0", "1.0.1", "1.0.2", "1.0.3"]) publish(version);
+		const lsof = createLsofShim();
+		const environment = { PATH: `${lsof}:/usr/bin:/bin` };
+		expect((await install("1.0.0", environment)).code).toBe(0);
+		const liveRelease = dirname(realpathSync(command()));
+		const orphan = join(installationRoot(), ".install.A1b2C3");
+		mkdirSync(orphan);
+		writeFileSync(join(orphan, "partial"), "fixture");
+		const uncertainStage = join(installationRoot(), ".install.keep");
+		mkdirSync(uncertainStage);
+		const outside = join(root, "outside-stage");
+		mkdirSync(outside);
+		const stagingLink = join(installationRoot(), ".install.Z9z9Z9");
+		symlinkSync(outside, stagingLink, "dir");
+		expect((await install("1.0.1", environment)).code).toBe(0);
+		expect(existsSync(orphan)).toBe(false);
+		expect(existsSync(uncertainStage)).toBe(true);
+		expect(lstatSync(stagingLink).isSymbolicLink()).toBe(true);
+		const uncertainRelease = dirname(realpathSync(command()));
+		const unknownRelease = join(installationRoot(), "releases/user-files");
+		mkdirSync(unknownRelease);
+		writeFileSync(join(unknownRelease, "keep"), "user data");
+		expect((await install("1.0.2", { ...environment, LIVE_EXECUTABLE: join(liveRelease, "prime-agent") })).code).toBe(
+			0,
+		);
+		expect(existsSync(liveRelease)).toBe(true);
+		expect(releaseDirectories()).toHaveLength(4);
+		expect(
+			(
+				await install("1.0.3", {
+					...environment,
+					LIVE_EXECUTABLE: join(liveRelease, "prime-agent"),
+					UNCERTAIN_EXECUTABLE: join(uncertainRelease, "prime-agent"),
+				})
+			).code,
+		).toBe(0);
+		expect(existsSync(liveRelease)).toBe(true);
+		expect(existsSync(uncertainRelease)).toBe(true);
+		expect(readFileSync(join(unknownRelease, "keep"), "utf8")).toBe("user data");
+		expect(releaseDirectories()).toHaveLength(5);
+		expect((await install("1.0.3", environment)).code).toBe(0);
+		expect(releaseDirectories()).toHaveLength(3);
+		expect(readFileSync(join(unknownRelease, "keep"), "utf8")).toBe("user data");
 	});
 
 	it("does not steal another installation's lock", async () => {
