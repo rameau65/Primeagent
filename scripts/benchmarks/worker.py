@@ -244,6 +244,7 @@ def install(request: Request, side: Side, trial: int) -> None:
             timeout=240,
             log=RESULTS / f"install-{trial}.log",
             extra_env={
+                "PRIME_AGENT_ALLOW_INSECURE_HTTP_FOR_TESTS": "1",
                 "PRIME_AGENT_DOWNLOAD_BASE_URL": ORIGIN,
                 "PRIME_AGENT_INSTALLER_PLAIN": "1",
                 "PRIME_AGENT_BOOTSTRAP_KERNEL_ON_INSTALL": "1",
