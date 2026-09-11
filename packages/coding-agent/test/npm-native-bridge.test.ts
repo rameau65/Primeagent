@@ -7,6 +7,7 @@ import {
 	mkdtempSync,
 	readFileSync,
 	realpathSync,
+	renameSync,
 	rmSync,
 	symlinkSync,
 	writeFileSync,
@@ -159,6 +160,24 @@ describe.skipIf(process.platform === "win32")("npm release bridge", () => {
 	it("does not downgrade a newer managed release", async () => {
 		native("1.0.1");
 		expect(await run([], foreground())).toMatchObject({ code: 0, stdout: "native:\n" });
+	});
+	it.each(["reuse", "download"])("migrates a scoped global package through %s", async (mode) => {
+		const scoped = join(dirname(pkg), "@earendil-works/pi-coding-agent");
+		mkdirSync(dirname(scoped), { recursive: true });
+		renameSync(pkg, scoped);
+		pkg = scoped;
+		entry = join(pkg, "dist/bundle/cli.js");
+		rmSync(publicCommand);
+		symlinkSync(entry, publicCommand);
+		const verify = async () => {
+			expect(await run([], foreground())).toMatchObject({ code: 0, stdout: "native:\n" });
+			expect(realpathSync(publicCommand)).toBe(realpathSync(join(home, "data/prime-agent/bin/prime-agent")));
+		};
+		if (mode === "download") await withReleaseFeed(verify);
+		else {
+			native();
+			await verify();
+		}
 	});
 	it.each(["platform", "unsupported", "broken", "wrong version"])(
 		"keeps Node for an incompatible native release: %s",

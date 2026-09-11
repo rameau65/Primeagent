@@ -127,7 +127,8 @@ async function migrationTarget(): Promise<string | undefined> {
 	if (process.platform !== "darwin" && process.platform !== "linux") return undefined;
 	if (process.env.PRIME_AGENT_INSTALL_METHOD === "node") return undefined;
 	// Only the public release package in a conventional global npm prefix owns this command.
-	const modules = dirname(packageDir);
+	const packageParent = dirname(packageDir);
+	const modules = basename(packageParent).startsWith("@") ? dirname(packageParent) : packageParent;
 	if (
 		basename(modules) !== "node_modules" ||
 		basename(dirname(modules)) !== "lib" ||
