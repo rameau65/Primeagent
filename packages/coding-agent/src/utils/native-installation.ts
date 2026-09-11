@@ -1,6 +1,19 @@
 import { lstatSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
+export const NATIVE_RELEASE_ASSETS = [
+	"prime-agent",
+	"package.json",
+	"install.sh",
+	"prime-agent-runtime/pyproject.toml",
+	"prime-agent-runtime/src/rlm/repl.py",
+	"theme/prime.json",
+	"export-html/template.html",
+	"photon_rs_bg.wasm",
+	".archive-sha256",
+	".install-source",
+] as const;
+
 export interface NativeInstallation {
 	root: string;
 	launcher: string;
@@ -29,6 +42,11 @@ export function readNativeInstallation(root: string, link = "prime-agent"): Nati
 		const executable = resolve(dirname(launcher), target);
 		if (realpathSync(executable) !== executable) return undefined;
 		const releaseDir = dirname(executable);
+		for (const asset of NATIVE_RELEASE_ASSETS) {
+			const assetPath = join(releaseDir, asset);
+			if (!lstatSync(assetPath).isFile() || lstatSync(assetPath).isSymbolicLink()) return undefined;
+			if (realpathSync(dirname(assetPath)) !== dirname(assetPath)) return undefined;
+		}
 		if (readFileSync(join(releaseDir, ".archive-sha256"), "utf8").trim() !== match[4]) return undefined;
 		const metadata = JSON.parse(readFileSync(join(releaseDir, "package.json"), "utf8")) as { version?: unknown };
 		if (metadata.version !== match[1]) return undefined;
