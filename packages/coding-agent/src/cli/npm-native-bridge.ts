@@ -153,6 +153,7 @@ async function migrationTarget(): Promise<string | undefined> {
 	if (!ownsPackageLink && (!native || realpathSync(publicCommand) !== native.executable)) return undefined;
 	if (ownsPackageLink && !isForegroundMigration()) return undefined;
 	if (!native || (comparePackageVersions(native.version, metadata.version) ?? -1) < 0) {
+		if (!isForegroundMigration()) return undefined;
 		if (process.env.PI_OFFLINE || args.includes("--offline")) return undefined;
 		const retryFile = join(packageDir, "dist/.native-migration-attempt");
 		if (process.env.PRIME_AGENT_MIGRATE_RETRY !== "1" && wasRecordedRecently(retryFile)) return undefined;

@@ -3,3 +3,4 @@
 - Fixed automatic migration delaying daemon startup, reusing incompatible compiled releases, and replacing a concurrent npm command.
 - Fixed automatic migration blocking informational and automated launches, hiding installer progress, suppressing retries after cancellation, and silently deferring invalid compiled releases.
 - Fixed migration from scoped global npm packages to compiled installations.
+- Fixed background and informational launches starting migration downloads after the public command had already switched to a compiled installation.

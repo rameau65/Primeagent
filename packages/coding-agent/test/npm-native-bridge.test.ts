@@ -161,6 +161,27 @@ describe.skipIf(process.platform === "win32")("npm release bridge", () => {
 		native("1.0.1");
 		expect(await run([], foreground())).toMatchObject({ code: 0, stdout: "native:\n" });
 	});
+	it.each([
+		{ label: "version check", args: ["--version"], env: {} },
+		{ label: "worker", args: [], env: { PRIME_AGENT_INTERNAL_DAEMON_WORKER: "1" } },
+		{ label: "coordinator", args: ["update", "--internal-update-restart-coordinator"], env: {} },
+		{ label: "non-interactive launch", args: [], env: {} },
+	])("does not download after handoff during a $label", async ({ label, args, env }) => {
+		native();
+		expect((await run([], foreground())).stdout).toBe("native:\n");
+		const older = native("0.9.0");
+		const installerCalled = join(root, "installer-called");
+		writeFileSync(join(pkg, "dist/install.sh"), '#!/bin/sh\ntouch "$BRIDGE_INSTALLER_CALLED"\nexit 1\n');
+		const environment = { ...env, BRIDGE_INSTALLER_CALLED: installerCalled };
+		expect(await run(args, label === "non-interactive launch" ? environment : foreground(environment))).toEqual({
+			code: 0,
+			stdout: `node:${args.join("|")}\n`,
+			stderr: "",
+		});
+		expect(existsSync(installerCalled)).toBe(false);
+		expect(existsSync(join(pkg, "dist/.native-migration-attempt"))).toBe(false);
+		expect(realpathSync(publicCommand)).toBe(older);
+	});
 	it.each(["reuse", "download"])("migrates a scoped global package through %s", async (mode) => {
 		const scoped = join(dirname(pkg), "@earendil-works/pi-coding-agent");
 		mkdirSync(dirname(scoped), { recursive: true });
