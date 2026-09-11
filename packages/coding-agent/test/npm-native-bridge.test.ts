@@ -23,6 +23,7 @@ let home: string;
 let pkg: string;
 let entry: string;
 let publicCommand: string;
+let ttyHook: string;
 
 function native(version = "1.0.0", suffix = "", platform = `${process.platform}-${process.arch}`) {
 	const install = join(home, "data/prime-agent");
@@ -45,7 +46,7 @@ function native(version = "1.0.0", suffix = "", platform = `${process.platform}-
 	return realpathSync(join(install, "bin/prime-agent"));
 }
 
-async function run(args: string[] = [], extra: NodeJS.ProcessEnv = {}) {
+function start(args: string[] = [], extra: NodeJS.ProcessEnv = {}) {
 	const child = spawn(process.execPath, [entry, ...args], {
 		env: { ...process.env, HOME: home, XDG_DATA_HOME: join(home, "data"), ...extra },
 		cwd: home,
@@ -59,10 +60,27 @@ async function run(args: string[] = [], extra: NodeJS.ProcessEnv = {}) {
 	child.stderr.on("data", (chunk) => {
 		stderr += chunk.toString();
 	});
-	return await new Promise<{ code: number | null; stdout: string; stderr: string }>((done, reject) => {
-		child.on("error", reject);
-		child.on("close", (code) => done({ code, stdout, stderr }));
-	});
+	const done = new Promise<{ code: number | null; signal: NodeJS.Signals | null; stdout: string; stderr: string }>(
+		(resolveResult, reject) => {
+			child.on("error", reject);
+			child.on("close", (code, signal) => resolveResult({ code, signal, stdout, stderr }));
+		},
+	);
+	return { child, done };
+}
+
+async function run(args: string[] = [], extra: NodeJS.ProcessEnv = {}) {
+	const { signal: _signal, ...result } = await start(args, extra).done;
+	return result;
+}
+
+function foreground(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+	return {
+		...extra,
+		NODE_OPTIONS: [process.env.NODE_OPTIONS, extra.NODE_OPTIONS, `--import=${pathToFileURL(ttyHook).href}`]
+			.filter(Boolean)
+			.join(" "),
+	};
 }
 
 describe.skipIf(process.platform === "win32")("npm release bridge", () => {
@@ -97,15 +115,20 @@ describe.skipIf(process.platform === "win32")("npm release bridge", () => {
 		writeFileSync(join(pkg, "dist/bundle/cli-node.js"), 'console.log("node:" + process.argv.slice(2).join("|"));\n');
 		writeFileSync(join(pkg, "dist/native-release.json"), JSON.stringify({ baseUrl: "http://127.0.0.1:1" }));
 		copyFileSync(resolve(__dirname, "../../../install.sh"), join(pkg, "dist/install.sh"));
+		ttyHook = join(root, "tty-hook.mjs");
+		writeFileSync(
+			ttyHook,
+			'Object.defineProperty(process.stdin, "isTTY", { value: true });\nObject.defineProperty(process.stderr, "isTTY", { value: true });\n',
+		);
 		symlinkSync(entry, publicCommand);
 	});
 	afterEach(() => rmSync(root, { recursive: true, force: true }));
 
 	it("switches the owned command and keeps the historical JS entrypoint on native for restart coordinators", async () => {
 		const executable = native();
-		expect(await run(["argument with spaces", "--rpc"])).toMatchObject({
+		expect(await run(["argument with spaces"], foreground())).toMatchObject({
 			code: 0,
-			stdout: "native:argument with spaces\nnative:--rpc\n",
+			stdout: "native:argument with spaces\n",
 		});
 		expect(realpathSync(publicCommand)).toBe(executable);
 		expect(await run(["update", "--internal-update-restart-coordinator"])).toMatchObject({
@@ -118,7 +141,7 @@ describe.skipIf(process.platform === "win32")("npm release bridge", () => {
 	});
 	it("does not downgrade a newer managed release", async () => {
 		native("1.0.1");
-		expect(await run(["--version"])).toMatchObject({ code: 0, stdout: "1.0.1\n" });
+		expect(await run([], foreground())).toMatchObject({ code: 0, stdout: "native:\n" });
 	});
 	it.each(["platform", "unsupported", "broken", "wrong version"])(
 		"keeps Node for an incompatible native release: %s",
@@ -133,7 +156,13 @@ describe.skipIf(process.platform === "win32")("npm release bridge", () => {
 			if (failure === "unsupported") writeFileSync(join(pkg, "dist/install.sh"), "#!/bin/sh\nexit 1\n");
 			if (failure === "broken") writeFileSync(executable, "#!/bin/sh\nexit 1\n");
 			if (failure === "wrong version") writeFileSync(executable, "#!/bin/sh\necho 0.8.0\n");
-			expect(await run(["--version"])).toMatchObject({ code: 0, stdout: "node:--version\n" });
+			const result = await run([], foreground());
+			expect(result).toMatchObject({ code: 0, stdout: "node:\n" });
+			if (failure === "unsupported") expect(result.stderr).toBe("");
+			else {
+				expect(result.stderr).toContain("Reinstall prime-agent");
+				expect((await run([], foreground())).stderr).toBe("");
+			}
 			expect(realpathSync(publicCommand)).toBe(entry);
 		},
 	);
@@ -149,9 +178,21 @@ describe.skipIf(process.platform === "win32")("npm release bridge", () => {
 		{ label: "daemon", args: ["--mode", "daemon"], env: {}, previous: undefined },
 		{ label: "worker", args: [], env: { PRIME_AGENT_INTERNAL_DAEMON_WORKER: "1" }, previous: undefined },
 		{ label: "catalog", args: [], env: { PRIME_AGENT_INTERNAL_DAEMON_CATALOG: "1" }, previous: undefined },
-	])("does not start migration before $label liveness", async ({ args, env, previous }) => {
+		{ label: "owned worker", args: [], env: { PRIME_AGENT_INTERNAL_OWNED_WORKER: "1" }, previous: undefined },
+		{
+			label: "interactive update child",
+			args: ["update"],
+			env: { PRIME_AGENT_INTERACTIVE_SELF_UPDATE: "1" },
+			previous: undefined,
+		},
+		{ label: "version output", args: ["--version"], env: {}, previous: undefined },
+		{ label: "help output", args: ["--help"], env: {}, previous: undefined },
+		{ label: "explicit output mode", args: ["--mode", "text"], env: {}, previous: undefined },
+		{ label: "non-interactive invocation", args: [], env: {}, previous: undefined },
+	])("does not start migration before $label liveness", async ({ label, args, env, previous }) => {
 		if (previous) native(previous);
-		expect(await run(args, env)).toEqual({ code: 0, stdout: `node:${args.join("|")}\n`, stderr: "" });
+		const environment = label === "non-interactive invocation" ? env : foreground(env);
+		expect(await run(args, environment)).toEqual({ code: 0, stdout: `node:${args.join("|")}\n`, stderr: "" });
 		expect(existsSync(join(pkg, "dist/.native-migration-attempt"))).toBe(false);
 		expect(realpathSync(publicCommand)).toBe(entry);
 	});
@@ -197,10 +238,9 @@ fs.symlinkSync = (target, path) => {
 syncBuiltinESMExports();
 `,
 			);
-			expect(await run(["--version"], { NODE_OPTIONS: `--import=${pathToFileURL(hook).href}` })).toMatchObject({
-				code: 0,
-				stdout: "node:--version\n",
-			});
+			expect(
+				await run(["launch"], foreground({ NODE_OPTIONS: `--import=${pathToFileURL(hook).href}` })),
+			).toMatchObject({ code: 0, stdout: "node:launch\n" });
 			expect(realpathSync(publicCommand)).toBe(phase === "package" ? entry : replacement);
 		},
 	);
@@ -216,11 +256,14 @@ syncBuiltinESMExports();
 				'#!/bin/sh\ntouch "$BRIDGE_READY"\nwhile [ ! -e "$BRIDGE_PROCEED" ]; do sleep 0.02; done\nexec /bin/sh "$@"\n',
 				{ mode: 0o755 },
 			);
-			const pending = run(["--version"], {
-				PATH: `${shim}:/usr/bin:/bin`,
-				BRIDGE_READY: ready,
-				BRIDGE_PROCEED: proceed,
-			});
+			const pending = run(
+				["launch"],
+				foreground({
+					PATH: `${shim}:/usr/bin:/bin`,
+					BRIDGE_READY: ready,
+					BRIDGE_PROCEED: proceed,
+				}),
+			);
 			let newer: string | undefined;
 			try {
 				await expect.poll(() => existsSync(ready), { timeout: 5000 }).toBe(true);
@@ -228,22 +271,57 @@ syncBuiltinESMExports();
 			} finally {
 				writeFileSync(proceed, "");
 			}
-			expect(await pending).toMatchObject({ code: 0, stdout: "node:--version\n" });
+			expect(await pending).toMatchObject({ code: 0, stdout: "node:launch\n" });
 			expect(realpathSync(join(home, "data/prime-agent/bin/prime-agent"))).toBe(newer);
 			expect(realpathSync(publicCommand)).toBe(entry);
+			expect(await run([], foreground())).toMatchObject({ code: 0, stdout: "native:\n" });
 			expect(await run(["--version"])).toMatchObject({ code: 0, stdout: "1.0.1\n" });
 		});
 	});
 
 	it("recognizes a fresh reinstall directory", async () => {
 		const executable = native("1.0.0", ".AbC123");
-		expect(await run(["--version"])).toMatchObject({ code: 0, stdout: "1.0.0\n" });
+		expect(await run([], foreground())).toMatchObject({ code: 0, stdout: "native:\n" });
 		expect(realpathSync(publicCommand)).toBe(executable);
+	});
+
+	it("shows foreground installer progress on stderr without changing application stdout", async () => {
+		const started = join(root, "installer-started");
+		writeFileSync(
+			join(pkg, "dist/install.sh"),
+			`#!/bin/sh\ntouch ${JSON.stringify(started)}\nprintf 'download progress\\n'\nprintf 'verification progress\\n' >&2\nsleep 0.1\nexit 1\n`,
+			{ mode: 0o755 },
+		);
+		const result = await run([], foreground());
+		expect(result).toMatchObject({ code: 0, stdout: "node:\n" });
+		expect(result.stderr).toContain("migrating 1.0.0 from npm");
+		expect(result.stderr).toContain("download progress");
+		expect(result.stderr).toContain("verification progress");
+		expect(result.stderr).toContain("migration deferred");
+		expect(existsSync(started)).toBe(true);
+		expect(existsSync(join(pkg, "dist/.native-migration-attempt"))).toBe(true);
+	});
+
+	it("cancels the foreground installer without suppressing the next migration attempt", async () => {
+		const started = join(root, "installer-started");
+		writeFileSync(
+			join(pkg, "dist/install.sh"),
+			`#!/bin/sh\ntrap 'exit 130' INT TERM HUP\ntouch ${JSON.stringify(started)}\nsleep 30\n`,
+			{ mode: 0o755 },
+		);
+		const pending = start([], foreground());
+		await expect.poll(() => existsSync(started), { timeout: 5000 }).toBe(true);
+		pending.child.kill("SIGINT");
+		const result = await pending.done;
+		expect(result.signal).toBe("SIGINT");
+		expect(existsSync(join(pkg, "dist/.native-migration-attempt"))).toBe(false);
 	});
 
 	it("downloads and activates through the shipped installer without npm lifecycle scripts", async () => {
 		await withReleaseFeed(async (checksum) => {
-			expect(await run(["--version"])).toMatchObject({ code: 0, stdout: "1.0.0\n", stderr: "" });
+			const result = await run([], foreground());
+			expect(result).toMatchObject({ code: 0, stdout: "native:\n" });
+			expect(result.stderr).toContain("migrating 1.0.0 from npm");
 			expect(realpathSync(publicCommand)).toContain(
 				`/releases/1.0.0-${process.platform}-${process.arch}-${checksum}/`,
 			);
@@ -288,22 +366,24 @@ syncBuiltinESMExports();
 	}
 	it("preserves the native exit status", async () => {
 		native();
-		expect((await run(["fail"])).code).toBe(23);
+		expect((await run(["fail"], foreground())).code).toBe(23);
 	});
 	it.each(["offline", "opt-out", "failed-download"])("keeps Node usable for %s", async (reason) => {
 		const result = await run(
-			["--version"],
-			reason === "offline"
-				? { PI_OFFLINE: "1" }
-				: reason === "opt-out"
-					? { PRIME_AGENT_INSTALL_METHOD: "node" }
-					: {},
+			[],
+			foreground(
+				reason === "offline"
+					? { PI_OFFLINE: "1" }
+					: reason === "opt-out"
+						? { PRIME_AGENT_INSTALL_METHOD: "node" }
+						: {},
+			),
 		);
-		expect(result).toMatchObject({ code: 0, stdout: "node:--version\n" });
+		expect(result).toMatchObject({ code: 0, stdout: "node:\n" });
 		expect(realpathSync(publicCommand)).toBe(entry);
 		if (reason === "failed-download") {
 			expect(result.stderr).toContain("migration deferred");
-			expect((await run(["--version"])).stderr).toBe("");
+			expect((await run([], foreground())).stderr).toBe("");
 		}
 	});
 	it("does not replace another command owner", async () => {
