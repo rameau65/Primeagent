@@ -41,6 +41,39 @@ describe("SubagentSummaryLine", () => {
 		expect(rendered[1]).toContain("● 1 running   ◐ 1 idle   ○ 0 inactive");
 	});
 
+	it("renders the subagents label without raw bold escapes", () => {
+		const line = new SubagentSummaryLine();
+		line.setSubagentCounts({ total: 1, running: 1, idle: 0, inactive: 0 });
+
+		const raw = line.render(120).join("\n");
+		expect(raw).toContain("subagents");
+		expect(raw).not.toContain("\x1b[1m");
+	});
+
+	it("hides the info line and the agents tile while a picker is open", () => {
+		let pickerOpen = false;
+		const line = new SubagentSummaryLine(
+			() => "test-model",
+			() => "75k (75%)",
+			undefined,
+			() => pickerOpen,
+		);
+		line.setSubagentCounts({ total: 2, running: 1, idle: 1, inactive: 0 });
+		line.setOpenable(true);
+
+		const closed = line.render(120).map(stripAnsi);
+		expect(closed).toHaveLength(4);
+		expect(closed[0]).toContain("test-model");
+		expect(closed[0]).toContain("75k (75%)");
+		expect(closed[1]).toContain("╭─ subagents ─");
+
+		pickerOpen = true;
+		expect(line.render(120)).toEqual([]);
+
+		pickerOpen = false;
+		expect(line.render(120).map(stripAnsi)).toHaveLength(4);
+	});
+
 	it("hints ↓ select when unfocused and Enter/→ open when focused", () => {
 		const line = new SubagentSummaryLine();
 		line.setSubagentCounts({ total: 1, running: 1, idle: 0, inactive: 0 });

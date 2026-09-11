@@ -13,6 +13,7 @@ import {
 	type TUI,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
+import stripAnsi from "strip-ansi";
 import { beforeAll, describe, expect, test, vi } from "vitest";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.js";
 import { formatNoModelsAvailableMessage } from "../src/core/auth-guidance.js";
@@ -695,7 +696,6 @@ describe("InteractiveMode working timer", () => {
 		createWorkingLoader: ReturnType<typeof vi.fn>;
 		statusContainer: { addChild: ReturnType<typeof vi.fn> };
 		startWorkingTimer: ReturnType<typeof vi.fn>;
-		startFeatureHintPresentation: ReturnType<typeof vi.fn>;
 	};
 
 	function createInitialTimerHarness(snapshot: AgentConnectionSnapshot, turnStartedAt = 1): InitialTimerHarness {
@@ -723,7 +723,6 @@ describe("InteractiveMode working timer", () => {
 			createWorkingLoader: vi.fn(() => ({})),
 			statusContainer: { addChild: vi.fn() },
 			startWorkingTimer: vi.fn(),
-			startFeatureHintPresentation: vi.fn(),
 		});
 	}
 
@@ -1272,7 +1271,6 @@ describe("InteractiveMode pending bash components", () => {
 			queuedMessagesContainer: new Container(),
 			pendingBashComponents: [component],
 			getAllQueuedMessages: () => ({ steering: [], followUp: [] }),
-			featureHintSuppressedByQueue: false,
 		} as unknown as InteractiveMode;
 
 		(
@@ -1300,8 +1298,6 @@ describe("InteractiveMode pending bash components", () => {
 			}),
 			isRecognizedSlashCommand: (name: string) => name === "compact",
 			getAppKeyDisplay: () => "Ctrl+Q",
-			featureHintSuppressedByQueue: false,
-			clearFeatureHintPresentation: vi.fn(),
 		} as unknown as InteractiveMode;
 
 		(
@@ -1387,11 +1383,9 @@ describe("InteractiveMode pending bash components", () => {
 		expect(loader.intervalId).not.toBeNull();
 
 		const editorStub = { clearHistory: vi.fn(), setText: vi.fn() };
-		const endFeatureHintRun = vi.fn();
 		const queueSelection = new QueueSelection();
 		queueSelection.move({ steering: ["s1"], followUp: [] }, "draft", -1);
 		const fakeThis = {
-			endFeatureHintRun,
 			queueSelection,
 			chatContainer: new Container(),
 			shortcutGuideContainer: new Container(),
@@ -1424,7 +1418,6 @@ describe("InteractiveMode pending bash components", () => {
 		).resetCurrentSessionRenderState.call(fakeThis);
 
 		expect(loader.intervalId).toBeNull();
-		expect(endFeatureHintRun).toHaveBeenCalledOnce();
 		expect((fakeThis as unknown as { activeBashComponent: unknown }).activeBashComponent).toBeUndefined();
 		// Queue browsing is session-scoped: Enter in the next session must be a
 		// fresh prompt, and the previous session's stashed draft is discarded.
@@ -4265,6 +4258,8 @@ describe("InteractiveMode tray goal label", () => {
 			contextUsage: TrayUsage | undefined;
 		};
 		uiServices: { getContextUsage(): TrayUsage | undefined };
+		ui: { hasOverlay(): boolean };
+		editorContainer: { children: unknown[] };
 		getTrayContextLabel(): string | undefined;
 	};
 	const getTrayContextLabel = (InteractiveMode.prototype as unknown as TrayLabelHarness).getTrayContextLabel;
@@ -4305,11 +4300,13 @@ describe("InteractiveMode tray goal label", () => {
 			contextUsage: undefined,
 		};
 		fakeThis.uiServices = { getContextUsage: () => undefined };
+		fakeThis.ui = { hasOverlay: () => false };
+		fakeThis.editorContainer = { children: [] };
 
 		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s)");
 	});
 
-	test("combines active goals with token/context usage in one lower-tray label", () => {
+	test("shows context usage in the lower tray while preserving active goals", () => {
 		const fakeThis = Object.create(InteractiveMode.prototype) as TrayLabelHarness;
 		fakeThis.heartbeatCatalog = [];
 		fakeThis.subagentSnapshots = new Map<string, never>();
@@ -4327,11 +4324,13 @@ describe("InteractiveMode tray goal label", () => {
 			contextUsage: { contextWindow: 100_000, tokens: 75_000, percent: 75 },
 		};
 		fakeThis.uiServices = { getContextUsage: () => undefined };
+		fakeThis.ui = { hasOverlay: () => false };
+		fakeThis.editorContainer = { children: [] };
 
-		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s) · 75k (75%)");
+		expect(stripAnsi(getTrayContextLabel.call(fakeThis)!)).toBe("Pursuing goal (1m 05s) · 75k (75%)");
 	});
 
-	test("combines active goals, active heartbeats, and context usage in one lower-tray label", () => {
+	test("combines active goals, heartbeats, and context usage below", () => {
 		const fakeThis = Object.create(InteractiveMode.prototype) as TrayLabelHarness;
 		fakeThis.heartbeatCatalog = [{ job: createHeartbeat("active") }];
 		fakeThis.subagentSnapshots = new Map<string, never>();
@@ -4350,8 +4349,10 @@ describe("InteractiveMode tray goal label", () => {
 			contextUsage: { contextWindow: 100_000, tokens: 75_000, percent: 75 },
 		};
 		fakeThis.uiServices = { getContextUsage: () => undefined };
+		fakeThis.ui = { hasOverlay: () => false };
+		fakeThis.editorContainer = { children: [] };
 
-		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s) · 1 heartbeat · 75k (75%)");
+		expect(stripAnsi(getTrayContextLabel.call(fakeThis)!)).toBe("Pursuing goal (1m 05s) · 1 heartbeat · 75k (75%)");
 	});
 
 	test("omits the usage segment when token count is unknown", () => {
@@ -4372,6 +4373,8 @@ describe("InteractiveMode tray goal label", () => {
 			contextUsage: { contextWindow: 100_000, tokens: null, percent: null },
 		};
 		fakeThis.uiServices = { getContextUsage: () => undefined };
+		fakeThis.ui = { hasOverlay: () => false };
+		fakeThis.editorContainer = { children: [] };
 
 		expect(getTrayContextLabel.call(fakeThis)).toBe("Pursuing goal (1m 05s)");
 	});
@@ -5494,7 +5497,6 @@ test("only the queued user /refine settlement stops its loader", async () => {
 		isInitialized: true,
 		footer: { invalidate: vi.fn() },
 		updateConnectionStateFromEvent: vi.fn(),
-		prepareFeatureHintRun: vi.fn(),
 		activityTracker: { handleEvent: vi.fn(), reset: vi.fn() },
 		updateWorkingLoaderMessage: vi.fn(),
 		renderRecap: vi.fn(),
