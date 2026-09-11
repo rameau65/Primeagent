@@ -186,6 +186,9 @@ export type ThemeBg =
 type ColorMode = "truecolor" | "256color";
 
 const ADAPTIVE_LIGHT_BG_ACCENT: Rgb = { r: 0, g: 95, b: 135 };
+const SOFT_SELECTION_ALPHA = 0.5;
+const EFFORT_SQUARE_DARK_COLOR = "#a78bfa";
+const EFFORT_SQUARE_LIGHT_COLOR = "#8b5cf6";
 const SURFACE_MIN_LUMINANCE_DELTA = 12;
 const SURFACE_CONTRAST_ALPHA = 0.08;
 // Selection rows must stand out clearly, much more than passive surfaces.
@@ -498,6 +501,36 @@ export class Theme {
 		return (str: string) => `${ansi}${str}\x1b[49m`;
 	}
 
+	/**
+	 * Row-selection highlight for menu rows: the selection color blended halfway
+	 * toward the editor surface, a softer band than the full selection block.
+	 */
+	getSoftSelectionBackgroundColor(): (str: string) => string {
+		const terminalBg = getDefaultTerminalColors()?.background;
+		const selectedBgValue = this.bgColorValues.get("selectedBg");
+		// Basic ANSI colors (0-15) are terminal-defined; their rendered color is
+		// unknown, so no reliable blend base exists.
+		if (!terminalBg || (typeof selectedBgValue === "number" && selectedBgValue < 16)) {
+			return (str: string) => this.bg("selectedBg", str);
+		}
+		const surfaceRgb = colorValueToRgb(this.bgColorValues.get("userMessageBg"));
+		const selectionRgb = colorValueToRgb(selectedBgValue);
+		if (!surfaceRgb || !selectionRgb) {
+			return (str: string) => this.bg("selectedBg", str);
+		}
+		const surfaceAnsi = bestAnsiColor(surfaceRgb, this.mode);
+		// Half contrast by default; strengthen the blend only when quantization
+		// would collapse the highlight into the editor surface.
+		for (const alpha of [SOFT_SELECTION_ALPHA, 0.75, 1]) {
+			const adjusted = bestAnsiColor(blendColor(selectionRgb, surfaceRgb, alpha), this.mode);
+			if (adjusted !== "" && adjusted !== surfaceAnsi) {
+				const ansi = bgAnsi(adjusted, this.mode);
+				return (str: string) => `${ansi}${str}[49m`;
+			}
+		}
+		return this.getSelectionBackgroundColor();
+	}
+
 	private surfaceBackgroundColor(color: ThemeBg): (str: string) => string {
 		const terminalBg = getDefaultTerminalColors()?.background;
 		const surfaceRgb = colorValueToRgb(this.bgColorValues.get(color));
@@ -517,6 +550,17 @@ export class Theme {
 		}
 		const ansi = bgAnsi(adjustedColor, this.mode);
 		return (str: string) => `${ansi}${str}\x1b[49m`;
+	}
+
+	/** Filled effort squares: a pastel purple that reads softer than the theme accent. */
+	getEffortSquareColor(): (str: string) => string {
+		const hex = getTerminalBackgroundKind() === "light" ? EFFORT_SQUARE_LIGHT_COLOR : EFFORT_SQUARE_DARK_COLOR;
+		const color = bestAnsiColor(hexToRgb(hex), this.mode);
+		if (color === "") {
+			return (str: string) => this.fg("accent", str);
+		}
+		const ansi = fgAnsi(color, this.mode);
+		return (str: string) => `${ansi}${str}[39m`;
 	}
 
 	getAdaptiveAccentColor(): (str: string) => string {
